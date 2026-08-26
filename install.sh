@@ -60,14 +60,12 @@ install_os_packages() {
   
   local packages="ca-certificates curl git unzip fontconfig libnspr4"
   
-  # Добавляем libicu в зависимости от версии Ubuntu
   if is_ubuntu; then
     apt-get install -y -qq software-properties-common 2>/dev/null || true
     add-apt-repository -y ppa:xtradeb/apps -qq 2>/dev/null || true
     apt-get update -qq
   fi
   
-  # Пробуем найти подходящий libicu
   local icu_pkg=""
   for p in libicu78 libicu76 libicu74 libicu72 libicu70 libicu67; do
     if apt-cache show "$p" &>/dev/null; then
@@ -82,20 +80,34 @@ install_os_packages() {
   log_ok "Системные пакеты установлены"
 }
 
-install_aspnetcore_runtime() {
-  if [[ -x "${DOTNET_INSTALL_DIR}/dotnet" ]] \
-    && "${DOTNET_INSTALL_DIR}/dotnet" --list-runtimes 2>/dev/null | grep -q 'Microsoft.AspNetCore.App 10.'; then
-    log_skip "ASP.NET Core 10 уже установлен"
-    return 0
+install_dotnet_sdk_and_runtime() {
+  log_info "Установка .NET SDK и Runtime 10.0..."
+  
+  # Устанавливаем SDK (нужен для сборки)
+  local sdk_installer="/tmp/dotnet-sdk-$$.sh"
+  curl -fsSL https://dot.net/v1/dotnet-install.sh -o "$sdk_installer"
+  chmod +x "$sdk_installer"
+  bash "$sdk_installer" --channel "$DOTNET_CHANNEL" --install-dir "$DOTNET_INSTALL_DIR"
+  rm -f "$sdk_installer"
+  
+  # Устанавливаем ASP.NET Core Runtime (для запуска)
+  local runtime_installer="/tmp/dotnet-runtime-$$.sh"
+  curl -fsSL https://dot.net/v1/dotnet-install.sh -o "$runtime_installer"
+  chmod +x "$runtime_installer"
+  bash "$runtime_installer" --channel "$DOTNET_CHANNEL" --runtime aspnetcore --install-dir "$DOTNET_INSTALL_DIR"
+  rm -f "$runtime_installer"
+  
+  # Добавляем dotnet в PATH для текущей сессии
+  export DOTNET_ROOT="$DOTNET_INSTALL_DIR"
+  export PATH="$PATH:$DOTNET_INSTALL_DIR"
+  
+  # Проверяем установку
+  if ! "$DOTNET_INSTALL_DIR/dotnet" --version &>/dev/null; then
+    log_err "Ошибка установки .NET SDK"
+    exit 1
   fi
   
-  log_info "Установка ASP.NET Core 10..."
-  local installer="/tmp/dotnet-install-$$.sh"
-  curl -fsSL https://dot.net/v1/dotnet-install.sh -o "$installer"
-  chmod +x "$installer"
-  bash "$installer" --channel "$DOTNET_CHANNEL" --runtime aspnetcore --install-dir "$DOTNET_INSTALL_DIR"
-  rm -f "$installer"
-  log_ok "ASP.NET Core 10 установлен"
+  log_ok ".NET SDK и Runtime $DOTNET_CHANNEL установлены"
 }
 
 ensure_service_user() {
@@ -111,9 +123,18 @@ install_app() {
   
   log_info "Сборка приложения..."
   export DOTNET_ROOT="$DOTNET_INSTALL_DIR"
-  export PATH="$PATH:$DOTNET_ROOT"
+  export PATH="$PATH:$DOTNET_INSTALL_DIR"
   cd "$INSTALL_ROOT"
-  $DOTNET_INSTALL_DIR/dotnet publish -c Release -o "$INSTALL_ROOT/publish"
+  
+  # Восстанавливаем зависимости и публикуем
+  "$DOTNET_INSTALL_DIR/dotnet" restore
+  "$DOTNET_INSTALL_DIR/dotnet" publish -c Release -o "$INSTALL_ROOT/publish"
+  
+  if [[ ! -f "$INSTALL_ROOT/publish/Core.dll" ]]; then
+    log_err "Сборка не удалась — файл Core.dll не найден"
+    exit 1
+  fi
+  
   log_ok "Приложение собрано"
 }
 
@@ -146,10 +167,8 @@ EOF
 configure_focus_tv() {
   log_info "Настройка конфигурации..."
   
-  # Пароль админа
   echo -n "Vfhifk1981@" > "${INSTALL_ROOT}/passwd"
   
-  # init.conf
   cat > "${INSTALL_ROOT}/init.conf" << 'INITEOF'
 {
   "WebLog": {
@@ -198,7 +217,6 @@ configure_focus_tv() {
 }
 INITEOF
 
-  # Тестовый пользователь
   cat > "${INSTALL_ROOT}/users.json" << 'USERSEOF'
 [
   {
@@ -213,7 +231,6 @@ INITEOF
 ]
 USERSEOF
 
-  # Копируем AdminPanel
   if [[ -d "${INSTALL_ROOT}/module/AdminPanel" ]]; then
     mkdir -p "${INSTALL_ROOT}/mods"
     cp -r "${INSTALL_ROOT}/module/AdminPanel" "${INSTALL_ROOT}/mods/AdminPanel"
@@ -222,7 +239,6 @@ USERSEOF
     fi
   fi
 
-  # Правка app.min.js (убираем " - SOURCE")
   if [[ -f "${INSTALL_ROOT}/wwwroot/lampa-main/app.min.js" ]]; then
     sed -i "s/+ ' - ' + Storage.field('source').toUpperCase()//g" "${INSTALL_ROOT}/wwwroot/lampa-main/app.min.js"
   fi
@@ -284,7 +300,7 @@ main() {
   printf '\n'
 
   install_os_packages
-  install_aspnetcore_runtime
+  install_dotnet_sdk_and_runtime
 
   if [[ "$UPDATE" -eq 1 ]]; then
     install_app
